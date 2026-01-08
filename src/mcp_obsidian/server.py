@@ -1,23 +1,11 @@
-import json
 import logging
-from collections.abc import Sequence
-from functools import lru_cache
-from typing import Any
 import os
 from dotenv import load_dotenv
-from mcp.server import Server
-from mcp.types import (
-    Tool,
-    TextContent,
-    ImageContent,
-    EmbeddedResource,
-)
+from mcp.server.fastmcp import FastMCP
 
 load_dotenv()
 
 from . import tools
-
-# Load environment variables
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -27,20 +15,26 @@ api_key = os.getenv("OBSIDIAN_API_KEY")
 if not api_key:
     raise ValueError(f"OBSIDIAN_API_KEY environment variable required. Working directory: {os.getcwd()}")
 
-app = Server("mcp-obsidian")
+# Create FastMCP server with streamable HTTP configuration
+mcp = FastMCP(
+    "mcp-obsidian",
+    host="0.0.0.0",
+    port=3000,
+)
 
+# Tool handlers registry
 tool_handlers = {}
+
 def add_tool_handler(tool_class: tools.ToolHandler):
     global tool_handlers
-
     tool_handlers[tool_class.name] = tool_class
 
 def get_tool_handler(name: str) -> tools.ToolHandler | None:
     if name not in tool_handlers:
         return None
-    
     return tool_handlers[name]
 
+# Register all tool handlers
 add_tool_handler(tools.ListFilesInDirToolHandler())
 add_tool_handler(tools.ListFilesInVaultToolHandler())
 add_tool_handler(tools.GetFileContentsToolHandler())
@@ -55,39 +49,33 @@ add_tool_handler(tools.PeriodicNotesToolHandler())
 add_tool_handler(tools.RecentPeriodicNotesToolHandler())
 add_tool_handler(tools.RecentChangesToolHandler())
 
-@app.list_tools()
-async def list_tools() -> list[Tool]:
-    """List available tools."""
+# Register tools with FastMCP using decorators by wrapping existing handlers
+for handler_name, handler in tool_handlers.items():
+    tool_desc = handler.get_tool_description()
 
-    return [th.get_tool_description() for th in tool_handlers.values()]
+    # Create a wrapper function for each tool
+    def make_tool_wrapper(h):
+        def tool_wrapper(**kwargs):
+            try:
+                result = h.run_tool(kwargs)
+                # Convert result to string if it's a list of TextContent
+                if isinstance(result, list):
+                    return "\n".join(item.text if hasattr(item, 'text') else str(item) for item in result)
+                return result
+            except Exception as e:
+                logger.error(str(e))
+                raise RuntimeError(f"Caught Exception. Error: {str(e)}")
 
-@app.call_tool()
-async def call_tool(name: str, arguments: Any) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
-    """Handle tool calls for command line run."""
-    
-    if not isinstance(arguments, dict):
-        raise RuntimeError("arguments must be dictionary")
+        # Set function metadata for FastMCP
+        tool_wrapper.__name__ = h.name
+        tool_wrapper.__doc__ = tool_desc.description
+        return tool_wrapper
+
+    wrapper = make_tool_wrapper(handler)
+    mcp.tool(name=handler_name, description=tool_desc.description)(wrapper)
 
 
-    tool_handler = get_tool_handler(name)
-    if not tool_handler:
-        raise ValueError(f"Unknown tool: {name}")
-
-    try:
-        return tool_handler.run_tool(arguments)
-    except Exception as e:
-        logger.error(str(e))
-        raise RuntimeError(f"Caught Exception. Error: {str(e)}")
-
-
-async def main():
-
-    # Import here to avoid issues with event loops
-    from mcp.server.stdio import stdio_server
-
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(
-            read_stream,
-            write_stream,
-            app.create_initialization_options()
-        )
+def main():
+    """Run the MCP server with streamable HTTP transport."""
+    logger.info("Starting mcp-obsidian server on http://0.0.0.0:3000/mcp")
+    mcp.run(transport="streamable-http")
