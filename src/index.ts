@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
